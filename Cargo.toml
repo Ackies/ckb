@@ -48,7 +48,6 @@ members = [
     "util/multisig",
     "util/types",
     "util/jsonrpc-types",
-    "util/fee-estimator",
     "resource",
     "pow",
     "util/dao/utils",

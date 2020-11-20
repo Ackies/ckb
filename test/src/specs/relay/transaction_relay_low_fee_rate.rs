@@ -4,8 +4,11 @@ use crate::util::log_monitor::monitor_log_until_expected_show;
 use crate::util::mining::{mine, mine_until_out_bootstrap_period, out_ibd_mode};
 use crate::utils::wait_until;
 use crate::{Node, Spec};
-use ckb_fee_estimator::FeeRate;
-use ckb_types::{core::TransactionView, packed, prelude::*};
+use ckb_types::{
+    core::{FeeRate, TransactionView},
+    packed,
+    prelude::*,
+};
 use log::info;
 use std::fs;
 

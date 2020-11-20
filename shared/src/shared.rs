@@ -11,7 +11,7 @@ use ckb_error::{Error, InternalErrorKind};
 use ckb_notify::{NotifyController, NotifyService, PoolTransactionEntry, TransactionTopic};
 use ckb_proposal_table::{ProposalTable, ProposalView};
 use ckb_store::{ChainDB, ChainStore};
-use ckb_tx_pool::{TokioRwLock, TxEntry, TxPoolController, TxPoolServiceBuilder};
+use ckb_tx_pool::{error::Reject, TokioRwLock, TxEntry, TxPoolController, TxPoolServiceBuilder};
 use ckb_types::{
     core::{EpochExt, HeaderView},
     packed::Byte32,
@@ -95,7 +95,7 @@ impl Shared {
         }));
 
         let notify_abandon = notify_controller.clone();
-        tx_pool_builder.register_abandon(Box::new(move |entry: TxEntry| {
+        tx_pool_builder.register_reject(Box::new(move |entry: TxEntry, _reject: &Reject| {
             let notify_tx_entry = PoolTransactionEntry {
                 transaction: entry.transaction,
                 cycles: entry.cycles,

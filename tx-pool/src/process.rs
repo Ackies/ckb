@@ -1,5 +1,4 @@
 use crate::block_assembler::{BlockAssembler, BlockTemplateCacheKey, TemplateCache};
-use crate::callback::Callbacks;
 use crate::component::commit_txs_scanner::CommitTxsScanner;
 use crate::component::entry::TxEntry;
 use crate::error::{BlockAssemblerError, Reject};
@@ -433,7 +432,7 @@ impl TxPoolService {
                 TxStatus::Proposed => tx_pool.add_proposed(entry.clone())?,
             };
             if inserted {
-                self.callbacks.call_pending(&entry);
+                tx_pool.callbacks.call_pending(entry);
                 tx_pool.update_statics_for_add_tx(tx_size, cache_entry.cycles);
             }
         }
@@ -511,7 +510,6 @@ impl TxPoolService {
                 attached_blocks,
                 detached_proposal_id,
                 snapshot,
-                &self.callbacks,
             )
         });
 
@@ -528,7 +526,12 @@ impl TxPoolService {
         let mut tx_pool = self.tx_pool.write().await;
         let config = tx_pool.config;
         let last_txs_updated_at = Arc::new(AtomicU64::new(0));
-        *tx_pool = TxPool::new(config, new_snapshot, last_txs_updated_at);
+        *tx_pool = TxPool::new(
+            config,
+            new_snapshot,
+            last_txs_updated_at,
+            Arc::clone(&tx_pool.callbacks),
+        );
     }
 }
 
@@ -539,7 +542,7 @@ type PreResolvedTxs = (
     Vec<(usize, Capacity, TxStatus)>,
 );
 
-type ResolveResult = Result<(ResolvedTransaction, usize, Capacity, TxStatus), Error>;
+type ResolveResult = Result<(ResolvedTransaction, usize, Capacity, TxStatus), Reject>;
 
 fn check_transaction_hash_collision(
     tx_pool: &TxPool,
@@ -562,7 +565,10 @@ fn resolve_tx<'a>(
 ) -> ResolveResult {
     let tx_size = tx.data().serialized_size_in_block();
     if tx_pool.reach_size_limit(tx_size) {
-        return Err(Reject::Full("size".to_owned(), tx_pool.config.max_mem_size as u64).into());
+        return Err(Reject::Full(
+            "size".to_owned(),
+            tx_pool.config.max_mem_size as u64,
+        ));
     }
 
     let short_id = tx.proposal_short_id();
@@ -570,6 +576,7 @@ fn resolve_tx<'a>(
         resolve_tx_from_proposed(tx_pool, snapshot, txs_provider, tx).and_then(|rtx| {
             let fee = tx_pool.calculate_transaction_fee(snapshot, &rtx);
             fee.map(|fee| (rtx, tx_size, fee, TxStatus::Proposed))
+                .map_err(|e| Reject::Malformed(format!("{}", e)))
         })
     } else {
         resolve_tx_from_pending_and_proposed(tx_pool, snapshot, txs_provider, tx).and_then(|rtx| {
@@ -580,6 +587,7 @@ fn resolve_tx<'a>(
             };
             let fee = tx_pool.calculate_transaction_fee(snapshot, &rtx);
             fee.map(|fee| (rtx, tx_size, fee, status))
+                .map_err(|e| Reject::Malformed(format!("{}", e)))
         })
     }
 }
@@ -589,10 +597,10 @@ fn resolve_tx_from_proposed<'a>(
     snapshot: &Snapshot,
     txs_provider: &'a TransactionsProvider<'a>,
     tx: TransactionView,
-) -> Result<ResolvedTransaction, Error> {
+) -> Result<ResolvedTransaction, Reject> {
     let cell_provider = OverlayCellProvider::new(&tx_pool.proposed, snapshot);
     let provider = OverlayCellProvider::new(txs_provider, &cell_provider);
-    resolve_transaction(tx, &mut HashSet::new(), &provider, snapshot)
+    resolve_transaction(tx, &mut HashSet::new(), &provider, snapshot).map_err(Reject::Resolve)
 }
 
 fn resolve_tx_from_pending_and_proposed<'a>(
@@ -600,13 +608,13 @@ fn resolve_tx_from_pending_and_proposed<'a>(
     snapshot: &Snapshot,
     txs_provider: &'a TransactionsProvider<'a>,
     tx: TransactionView,
-) -> Result<ResolvedTransaction, Error> {
+) -> Result<ResolvedTransaction, Reject> {
     let proposed_provider = OverlayCellProvider::new(&tx_pool.proposed, snapshot);
     let gap_and_proposed_provider = OverlayCellProvider::new(&tx_pool.gap, &proposed_provider);
     let pending_and_proposed_provider =
         OverlayCellProvider::new(&tx_pool.pending, &gap_and_proposed_provider);
     let provider = OverlayCellProvider::new(txs_provider, &pending_and_proposed_provider);
-    resolve_transaction(tx, &mut HashSet::new(), &provider, snapshot)
+    resolve_transaction(tx, &mut HashSet::new(), &provider, snapshot).map_err(Reject::Resolve)
 }
 
 fn verify_rtxs(
@@ -658,7 +666,6 @@ fn _update_tx_pool_for_reorg(
     attached_blocks: VecDeque<BlockView>,
     detached_proposal_id: HashSet<ProposalShortId>,
     snapshot: Arc<Snapshot>,
-    callbacks: &Callbacks,
 ) -> HashMap<Byte32, CacheEntry> {
     tx_pool.snapshot = Arc::clone(&snapshot);
     let mut detached = LinkedHashSet::default();
@@ -749,9 +756,9 @@ fn _update_tx_pool_for_reorg(
             tx_pool.proposed_tx_and_descendants(cycles, entry.size, entry.transaction.clone())
         {
             debug!("Failed to add proposed tx {}, reason: {}", tx_hash, e);
-            callbacks.call_abandon(&entry);
+            tx_pool.callbacks.call_reject(entry, &e);
         } else {
-            callbacks.call_proposed(&entry);
+            tx_pool.callbacks.call_proposed(entry);
         }
     }
 
@@ -760,7 +767,7 @@ fn _update_tx_pool_for_reorg(
         let tx_hash = entry.transaction.hash();
         if let Err(e) = tx_pool.gap_tx(cycles, entry.size, entry.transaction.clone()) {
             debug!("Failed to add tx to gap {}, reason: {}", tx_hash, e);
-            callbacks.call_abandon(&entry);
+            tx_pool.callbacks.call_reject(entry, &e);
         }
     }
 
