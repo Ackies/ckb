@@ -2,8 +2,9 @@
 //!
 //! A CKB service acts as an actor, which processes requests from a channel and sends back the
 //! response via one shot channel.
-use crate::core::{Capacity, Cycle, TransactionView};
+use crate::core::{tx_pool::Reject, Capacity, Cycle, TransactionView};
 use ckb_channel::Sender;
+use serde::{Deserialize, Serialize};
 use std::sync::mpsc;
 
 /// Default channel size to send control signals.
@@ -31,17 +32,6 @@ impl<A, R> Request<A, R> {
     }
 }
 
-/// Transaction notify topic
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TransactionTopic {
-    /// Subscribe new transactions which are submitted to the pool.
-    New,
-    /// Subscribe in-pool transactions which proposed on chain.
-    Proposed,
-    /// Subscribe transactions which are abandoned by tx-pool.
-    Abandoned,
-}
-
 /// Notify pool transaction entry
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PoolTransactionEntry {
@@ -53,4 +43,45 @@ pub struct PoolTransactionEntry {
     pub size: usize,
     /// Transaction fee
     pub fee: Capacity,
+}
+
+/// TX reject message
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PoolTransactionReject {
+    /// Transaction fee lower than config
+    LowFeeRate(String),
+
+    /// Transaction exceeded maximum ancestors count limit
+    ExceededMaximumAncestorsCount(String),
+
+    /// Transaction pool exceeded maximum size or cycles limit,
+    Full(String),
+
+    /// Transaction already exist in transaction_pool
+    Duplicated(String),
+
+    /// Malformed transaction
+    Malformed(String),
+
+    /// Resolve failed
+    Resolve(String),
+
+    /// Verification failed
+    Verification(String),
+}
+
+impl From<&Reject> for PoolTransactionReject {
+    fn from(reject: &Reject) -> Self {
+        match reject {
+            Reject::LowFeeRate(..) => Self::LowFeeRate(format!("{}", reject)),
+            Reject::ExceededMaximumAncestorsCount => {
+                Self::ExceededMaximumAncestorsCount(format!("{}", reject))
+            }
+            Reject::Full(..) => Self::Full(format!("{}", reject)),
+            Reject::Duplicated(_) => Self::Duplicated(format!("{}", reject)),
+            Reject::Malformed(_) => Self::Malformed(format!("{}", reject)),
+            Reject::Resolve(_) => Self::Resolve(format!("{}", reject)),
+            Reject::Verification(_) => Self::Verification(format!("{}", reject)),
+        }
+    }
 }
